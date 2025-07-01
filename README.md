@@ -1,3 +1,4 @@
+[![Go build](https://github.com/Netcracker/qubership-core-lib-go-dbaas-postgres-client/actions/workflows/go-build.yml/badge.svg)](https://github.com/Netcracker/qubership-core-lib-go-dbaas-postgres-client/actions/workflows/go-build.yml)
 [![Coverage](https://sonarcloud.io/api/project_badges/measure?metric=coverage&project=Netcracker_qubership-core-lib-go-dbaas-postgres-client)](https://sonarcloud.io/summary/overall?id=Netcracker_qubership-core-lib-go-dbaas-postgres-client)
 [![duplicated_lines_density](https://sonarcloud.io/api/project_badges/measure?metric=duplicated_lines_density&project=Netcracker_qubership-core-lib-go-dbaas-postgres-client)](https://sonarcloud.io/summary/overall?id=Netcracker_qubership-core-lib-go-dbaas-postgres-client)
 [![vulnerabilities](https://sonarcloud.io/api/project_badges/measure?metric=vulnerabilities&project=Netcracker_qubership-core-lib-go-dbaas-postgres-client)](https://sonarcloud.io/summary/overall?id=Netcracker_qubership-core-lib-go-dbaas-postgres-client)
@@ -52,7 +53,6 @@ import (
 
 func init() {
 	serviceloader.Register(1, &security.DummyToken{})
-	serviceloader.Register(1, &security.TenantContextObject{})
 }
 ```
 
@@ -397,6 +397,7 @@ import (
 	"context"
 	"github.com/netcracker/qubership-core-lib-go/v3/configloader"
 	"github.com/netcracker/qubership-core-lib-go/v3/context-propagation/ctxmanager"
+  "github.com/netcracker/qubership-core-lib-go/v3/context-propagation/baseproviders/tenant"
 	"github.com/netcracker/qubership-core-lib-go/v3/logging"
 	dbaasbase "github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3"
 	"github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3/model/rest"
@@ -409,7 +410,7 @@ var logger logging.Logger
 func init() {
 	configloader.Init(configloader.BasePropertySources())
 	logger = logging.GetLogger("main")
-	ctxmanager.Register([]ctxmanager.ContextProvider{tenantcontext.TenantProvider{}})
+	ctxmanager.Register([]ctxmanager.ContextProvider{tenant.TenantProvider{}})
 }
 
 type Book struct {

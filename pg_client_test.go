@@ -39,7 +39,6 @@ const (
 )
 
 func init() {
-	serviceloader.Register(1, &security.TenantContextObject{})
 	serviceloader.Register(1, &security.DummyToken{})
 }
 
@@ -521,7 +520,7 @@ func prepareTestContainer(t *testing.T, ctx context.Context) testcontainers.Cont
 		ExposedPorts: []string{port.Port()},
 		Env:          env,
 		WaitingFor: wait.ForAll(
-			wait.ForListeningPort(port),
+			wait.ForListeningPort(port).WithStartupTimeout(120 * time.Second),
 		),
 	}
 	pgContainer, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{

@@ -21,9 +21,7 @@ import (
 
 const (
 	dbaasAgentUrlEnvName     = "dbaas.agent"
-	keycloakUrlEnvName       = "identity.provider.url"
 	namespaceEnvName         = "microservice.namespace"
-	vaultAddressEnvName      = "vault.addr"
 	testServiceName          = "service_test"
 	createDatabaseV3         = "/api/v3/dbaas/test_namespace/databases"
 	getDatabaseV3            = "/api/v3/dbaas/test_namespace/databases/get-by-classifier/postgresql"
@@ -48,10 +46,8 @@ func (suite *DatabaseTestSuite) SetupSuite() {
 
 func (suite *DatabaseTestSuite) TearDownSuite() {
 	os.Unsetenv(dbaasAgentUrlEnvName)
-	os.Unsetenv(keycloakUrlEnvName)
 	os.Unsetenv(namespaceEnvName)
 	os.Unsetenv(propMicroserviceName)
-	os.Unsetenv(vaultAddressEnvName)
 	StopMockServer()
 }
 

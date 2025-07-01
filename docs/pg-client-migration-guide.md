@@ -84,9 +84,8 @@ Example of function which will create classifier in old format and how to use th
 func createOldClassifier(ctx context.Context) map[string]interface{} {
 	classifier := make(map[string]interface{})
 	classifier["microserviceName"] = configloader.GetKoanf().MustString("microservice.name")
-	tenantProvider := serviceloader.MustLoad[tenant.TenantProviderI]()
-	tenantId := tenantProvider.GetTenantId(ctx)
-	if tenantId == "-" || tenantId  == "" { 
+	tenantObject, err := tenant.Of(ctx)
+	if err != nil || tenantObject.GetTenant() == "" { 
 		logger.PanicC(ctx, "Can't create tenant database, tenantId is absent") 
 	}
 	classifier["tenantId"] = tenantObject.GetTenant()
