@@ -1,14 +1,14 @@
 module github.com/netcracker/qubership-core-lib-go-dbaas-postgres-client/v4
 
-go 1.22.0
+go 1.23
 
 toolchain go1.23.4
 
 require (
 	github.com/docker/go-connections v0.5.0
 	github.com/jackc/pgx/v5 v5.7.3
-	github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3 v3.0.0-20250418120050-44bc56d24469
-	github.com/netcracker/qubership-core-lib-go/v3 v3.0.0-20250418111846-e6298a4441a0
+	github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3 v3.0.0-20250820163446-1dfb1c34f40c
+	github.com/netcracker/qubership-core-lib-go/v3 v3.0.0-20250820163501-9b676001fe34
 	github.com/stretchr/testify v1.10.0
 	github.com/testcontainers/testcontainers-go v0.35.0
 	github.com/uptrace/bun v1.2.11
