@@ -10,11 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/go-connections/nat"
 	"github.com/jackc/pgx/v5/stdlib"
-	"github.com/netcracker/qubership-core-lib-go/v3/configloader"
-	"github.com/netcracker/qubership-core-lib-go/v3/serviceloader"
-	"github.com/netcracker/qubership-core-lib-go/v3/security"
 	dbaasbase "github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3"
 	"github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3/cache"
 	. "github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3/model"
@@ -23,9 +19,13 @@ import (
 	"github.com/netcracker/qubership-core-lib-go-dbaas-postgres-client/v4/model"
 	"github.com/netcracker/qubership-core-lib-go-dbaas-postgres-client/v4/testdata/migrations/correct"
 	incorrect "github.com/netcracker/qubership-core-lib-go-dbaas-postgres-client/v4/testdata/migrations/incorrect"
+	"github.com/netcracker/qubership-core-lib-go/v3/configloader"
+	"github.com/netcracker/qubership-core-lib-go/v3/security"
+	"github.com/netcracker/qubership-core-lib-go/v3/serviceloader"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
+	pgcontainer "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/uptrace/bun"
 )
 
@@ -507,31 +507,17 @@ func pgDbaasResponseHandler(address, password string) []byte {
 }
 
 func prepareTestContainer(t *testing.T, ctx context.Context) testcontainers.Container {
-	os.Setenv("TESTCONTAINERS_RYUK_DISABLED", "true")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
 
-	env := map[string]string{
-		"POSTGRES_USER":     testContainerDbUser,
-		"POSTGRES_PASSWORD": testContainerDbPassword,
-		"POSTGRES_DB":       testContainerDb,
-	}
-	port, _ := nat.NewPort("tcp", postgresPort)
-	req := testcontainers.ContainerRequest{
-		Image:        "postgres:15.6",
-		ExposedPorts: []string{port.Port()},
-		Env:          env,
-		WaitingFor: wait.ForAll(
-			wait.ForListeningPort(port).WithStartupTimeout(120 * time.Second),
-		),
-	}
-	pgContainer, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-	})
-	if err != nil {
-		t.Error(err)
-	}
+	pg, err := pgcontainer.Run(ctx,
+		"postgres:16-alpine",
+		pgcontainer.WithDatabase(testContainerDb),
+		pgcontainer.WithUsername(testContainerDbUser),
+		pgcontainer.WithPassword(testContainerDbPassword),
+		pgcontainer.BasicWaitStrategies(),
+	)
+	require.NoError(t, err)
 
-	os.Unsetenv("TESTCONTAINERS_RYUK_DISABLED")
-
-	return pgContainer
+	return pg
 }
