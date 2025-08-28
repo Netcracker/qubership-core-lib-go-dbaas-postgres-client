@@ -5,10 +5,9 @@ go 1.23.0
 toolchain go1.23.4
 
 require (
-	github.com/docker/go-connections v0.5.0
 	github.com/jackc/pgx/v5 v5.7.3
-	github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3 v3.0.0-20250418120050-44bc56d24469
-	github.com/netcracker/qubership-core-lib-go/v3 v3.0.0-20250418111846-e6298a4441a0
+	github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3 v3.0.0
+	github.com/netcracker/qubership-core-lib-go/v3 v3.0.0
 	github.com/stretchr/testify v1.10.0
 	github.com/testcontainers/testcontainers-go v0.38.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.38.0
@@ -29,6 +28,7 @@ require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/distribution/reference v0.6.0 // indirect
 	github.com/docker/docker v28.2.2+incompatible // indirect
+	github.com/docker/go-connections v0.5.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/ebitengine/purego v0.8.4 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
