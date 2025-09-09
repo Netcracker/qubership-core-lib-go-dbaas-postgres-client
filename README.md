@@ -41,7 +41,7 @@ To get `postgres dbaas client` use
  go get github.com/netcracker/qubership-core-lib-go-dbaas-postgres-client@<latest released version>
 ```
 
-List of all released versions may be found [here](https://github.com/netcracker/qubership-core-lib-go-dbaas-postgres-client/-/tags)
+List of all released versions may be found [here](https://github.com/netcracker/qubership-core-lib-go-dbaas-postgres-client/tags)
 
 ## Usage
 At first, it's necessary to register security implemention - dummy or your own, the followning example shows registration of required services:
