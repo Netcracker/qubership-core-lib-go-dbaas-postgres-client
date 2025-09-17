@@ -5,7 +5,7 @@ go 1.23.0
 toolchain go1.23.4
 
 require (
-	github.com/jackc/pgx/v5 v5.7.3
+	github.com/jackc/pgx/v5 v5.7.6
 	github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3 v3.0.2
 	github.com/netcracker/qubership-core-lib-go/v3 v3.1.0
 	github.com/stretchr/testify v1.11.1
