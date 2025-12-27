@@ -3,7 +3,7 @@ module github.com/netcracker/qubership-core-lib-go-dbaas-postgres-client/v4
 go 1.25.5
 
 require (
-	github.com/jackc/pgx/v5 v5.7.6
+	github.com/jackc/pgx/v5 v5.8.0
 	github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3 v3.0.10
 	github.com/netcracker/qubership-core-lib-go/v3 v3.3.0
 	github.com/stretchr/testify v1.11.1
