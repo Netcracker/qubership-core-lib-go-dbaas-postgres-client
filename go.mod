@@ -4,8 +4,8 @@ go 1.26.1
 
 require (
 	github.com/jackc/pgx/v5 v5.9.1
-	github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3 v3.3.2
-	github.com/netcracker/qubership-core-lib-go/v3 v3.7.1
+	github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3 v3.3.3
+	github.com/netcracker/qubership-core-lib-go/v3 v3.7.2
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go v0.41.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.41.0
@@ -48,7 +48,7 @@ require (
 	github.com/knadh/koanf/parsers/yaml v0.1.0 // indirect
 	github.com/knadh/koanf/providers/env v1.1.0 // indirect
 	github.com/knadh/koanf/providers/file v1.2.1 // indirect
-	github.com/knadh/koanf/v2 v2.3.2 // indirect
+	github.com/knadh/koanf/v2 v2.3.4 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/magiconair/properties v1.8.10 // indirect
 	github.com/mitchellh/copystructure v1.2.0 // indirect
