@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/netcracker/qubership-core-lib-go/v3/configloader"
+        restclient "github.com/netcracker/qubership-core-lib-go/v3/security/rest"
 	dbaasbase "github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3"
 	"github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3/model"
 	. "github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3/testutils"
@@ -36,6 +37,7 @@ type DatabaseTestSuite struct {
 
 func (suite *DatabaseTestSuite) SetupSuite() {
 	StartMockServer()
+        restclient.DefaultDbaasAgentUrl = GetMockServerUrl()
 	os.Setenv(dbaasAgentUrlEnvName, GetMockServerUrl())
 	os.Setenv(namespaceEnvName, "test_namespace")
 	os.Setenv(propMicroserviceName, testServiceName)
