@@ -158,12 +158,16 @@ github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3 v3.4.1 h1:QHuSZ
 github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3 v3.4.1/go.mod h1:2qw+C7Mc4jb0mrMDxkYALfC2Yv/3ChrgveYM2B2X6vw=
 github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3 v3.4.2 h1:hqRcPKF4fifh6n3cslQvhKBWUR5oXE4k26PbCErNUBQ=
 github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3 v3.4.2/go.mod h1:SgemFUBVrp3IkRNpM3O1KDT99MaZlBLKvkoIBvPav5I=
+github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3 v3.4.3 h1:ZKjUBA24MBJXCBmnJT1caCCEwNxwGmY81RPY3XRQ1ZQ=
+github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3 v3.4.3/go.mod h1:LyxxyvuRKKUobqIPhYr5+5ZwU3iIycorZDU3XgneJcE=
 github.com/netcracker/qubership-core-lib-go/v3 v3.8.0 h1:hDzflmqo5xmZmBjlmzYQp5gawDheKnuSJfiV1ED2DIo=
 github.com/netcracker/qubership-core-lib-go/v3 v3.8.0/go.mod h1:REJ6332XpbP4n20tnCrkJ2iNxgzoo0H6SEf5NHIKRvg=
 github.com/netcracker/qubership-core-lib-go/v3 v3.8.1 h1:31UTTAiPN7mJuLKlkDJ2foyRyNcyyb2nupQyBK+/7Zg=
 github.com/netcracker/qubership-core-lib-go/v3 v3.8.1/go.mod h1:REJ6332XpbP4n20tnCrkJ2iNxgzoo0H6SEf5NHIKRvg=
 github.com/netcracker/qubership-core-lib-go/v3 v3.9.0 h1:ak/Z+lXkszGK9bXO9qdJ4DPaPLdRsH+wMGzCTtB7OjE=
 github.com/netcracker/qubership-core-lib-go/v3 v3.9.0/go.mod h1:REJ6332XpbP4n20tnCrkJ2iNxgzoo0H6SEf5NHIKRvg=
+github.com/netcracker/qubership-core-lib-go/v3 v3.9.1 h1:Cz3NrT5kWYLVQciOZt0Rz4FHergTuIYLe3Nf5xu/edw=
+github.com/netcracker/qubership-core-lib-go/v3 v3.9.1/go.mod h1:REJ6332XpbP4n20tnCrkJ2iNxgzoo0H6SEf5NHIKRvg=
 github.com/niemeyer/pretty v0.0.0-20200227124842-a10e7caefd8e h1:fD57ERR4JtEqsWbfPhv4DMiApHyliiK5xCTNVSPiaAs=
 github.com/niemeyer/pretty v0.0.0-20200227124842-a10e7caefd8e/go.mod h1:zD1mROLANZcx1PVRCS0qkT7pwLkGfwJo4zjcN/Tysno=
 github.com/opencontainers/go-digest v1.0.0 h1:apOUWs51W5PlhuyGyz9FCeeBIOUDA/6nW8Oi/yOhh5U=
