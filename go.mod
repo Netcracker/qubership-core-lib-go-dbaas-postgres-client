@@ -5,7 +5,7 @@ go 1.26.2
 require (
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3 v3.4.1-0.20260502172348-79b8879d979f
-	github.com/netcracker/qubership-core-lib-go/v3 v3.8.2-0.20260428233515-5795851eb5ed
+	github.com/netcracker/qubership-core-lib-go/v3 v3.8.2-0.20260514133633-d05f0c13170b
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go v0.41.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.41.0
