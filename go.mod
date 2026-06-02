@@ -4,8 +4,8 @@ go 1.26.3
 
 require (
 	github.com/jackc/pgx/v5 v5.9.2
-	github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3 v3.4.4
-	github.com/netcracker/qubership-core-lib-go/v3 v3.10.0
+	github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3 v3.5.0
+	github.com/netcracker/qubership-core-lib-go/v3 v3.11.0
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go v0.41.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.41.0
@@ -31,10 +31,11 @@ require (
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/ebitengine/purego v0.10.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
-	github.com/fsnotify/fsnotify v1.9.0 // indirect
+	github.com/fsnotify/fsnotify v1.10.1 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
+	github.com/go-pkgz/expirable-cache/v3 v3.1.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
