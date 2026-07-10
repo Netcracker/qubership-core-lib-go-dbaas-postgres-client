@@ -56,6 +56,9 @@ func (p *pgClientImpl) GetSqlDb(ctx context.Context) (*sql.DB, error) {
 	}
 	// check if valid
 	if pErr := pgDb.PingContext(ctx); pErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		logger.Warnf("connection ping failed with err: %v. Deleting conn from cache and recreating connection", pErr)
 		p.postgresqlCache.Delete(key)
 		pgDb.Close()
@@ -140,7 +143,7 @@ func (p *pgClientImpl) createNewPgDb(ctx context.Context, classifier map[string]
 }
 
 func (p *pgClientImpl) isPasswordValid(ctx context.Context, pgDb *sql.DB) (bool, error) {
-	if _, err := pgDb.Exec("SELECT 1;"); err != nil {
+	if _, err := pgDb.ExecContext(ctx, "SELECT 1;"); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) {
 			pgErrCode := pgErr.Code // Code: the SQLSTATE code for the error
