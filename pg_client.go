@@ -8,15 +8,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/netcracker/qubership-core-lib-go/v3/utils"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
-	"github.com/netcracker/qubership-core-lib-go/v3/configloader"
 	dbaasbase "github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3"
 	"github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3/cache"
 	"github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3/model/rest"
 	"github.com/netcracker/qubership-core-lib-go-dbaas-postgres-client/v4/model"
+	"github.com/netcracker/qubership-core-lib-go/v3/configloader"
+	"github.com/netcracker/qubership-core-lib-go/v3/utils"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 	"github.com/uptrace/bun/migrate"
@@ -55,7 +55,7 @@ func (p *pgClientImpl) GetSqlDb(ctx context.Context) (*sql.DB, error) {
 		return nil, err
 	}
 	// check if valid
-	if pErr := pgDb.Ping(); pErr != nil {
+	if pErr := pgDb.PingContext(ctx); pErr != nil {
 		logger.Warnf("connection ping failed with err: %v. Deleting conn from cache and recreating connection", pErr)
 		p.postgresqlCache.Delete(key)
 		pgDb.Close()
@@ -64,7 +64,7 @@ func (p *pgClientImpl) GetSqlDb(ctx context.Context) (*sql.DB, error) {
 			return nil, err
 		}
 	}
-	if valid, vErr := p.isPasswordValid(pgDb); !valid && vErr == nil {
+	if valid, vErr := p.isPasswordValid(ctx, pgDb); !valid && vErr == nil {
 		logger.Info("authentication error, try to get new password")
 		connConfig, vErr := p.getPasswordAgain(ctx, classifier, p.params.BaseDbParams)
 		if vErr != nil {
@@ -139,7 +139,7 @@ func (p *pgClientImpl) createNewPgDb(ctx context.Context, classifier map[string]
 	}
 }
 
-func (p *pgClientImpl) isPasswordValid(pgDb *sql.DB) (bool, error) {
+func (p *pgClientImpl) isPasswordValid(ctx context.Context, pgDb *sql.DB) (bool, error) {
 	if _, err := pgDb.Exec("SELECT 1;"); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) {

@@ -2,8 +2,10 @@ package pgdbaas
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -520,4 +522,59 @@ func prepareTestContainer(t *testing.T, ctx context.Context) testcontainers.Cont
 	require.NoError(t, err)
 
 	return pg
+}
+
+func (suite *DatabaseTestSuite) TestPgClient_ContextCancellationOnStuckConnection() {
+	// blackhole server that will hang any connection attempts
+	blackholeListener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(suite.T(), err)
+	defer blackholeListener.Close()
+	go func() {
+		for {
+			conn, err := blackholeListener.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				select {} // block forever
+			}(conn)
+		}
+	}()
+
+	AddHandler(Contains(createDatabaseV3), func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusOK)
+		blackholeAddress := blackholeListener.Addr().String()
+		jsonString := pgDbaasResponseHandler(blackholeAddress, "any")
+		writer.Write(jsonString)
+	})
+	params := model.DbParams{Classifier: ServiceClassifier, BaseDbParams: rest.BaseDbParams{Role: "admin"}}
+	client := pgClientImpl{
+		params:          params,
+		postgresqlCache: &cache.DbaaSCache{LogicalDbCache: make(map[cache.Key]interface{})},
+		dbaasClient:     dbaasbase.NewDbaasClient(),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	// start DB creation in separate routine to not block the main thread
+	type result struct {
+		db  *sql.DB
+		err error
+	}
+	dbCreationResult := make(chan result, 1)
+	go func() {
+		db, err := client.GetSqlDb(ctx)
+		dbCreationResult <- result{db: db, err: err}
+	}()
+
+	select {
+	case res := <-dbCreationResult:
+		require.Error(suite.T(), res.err)
+		require.Contains(suite.T(), res.err.Error(), "context deadline exceeded")
+		require.Nil(suite.T(), res.db)
+	case <-time.After(1 * time.Second):
+		suite.T().Fatal("Context timeout is not taken into account")
+	}
 }
