@@ -524,7 +524,7 @@ func prepareTestContainer(t *testing.T, ctx context.Context) testcontainers.Cont
 	return pg
 }
 
-func (suite *DatabaseTestSuite) TestPgClient_ContextCancellationOnStuckConnection() {
+func (suite *DatabaseTestSuite) TestPgClient_ContextCancellationRecreatesPool() {
 	// blackhole server that will hang any connection attempts
 	blackholeListener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(suite.T(), err)
@@ -542,17 +542,18 @@ func (suite *DatabaseTestSuite) TestPgClient_ContextCancellationOnStuckConnectio
 		}
 	}()
 
-	AddHandler(Contains(createDatabaseV3), func(writer http.ResponseWriter, request *http.Request) {
-		writer.WriteHeader(http.StatusOK)
-		blackholeAddress := blackholeListener.Addr().String()
-		jsonString := pgDbaasResponseHandler(blackholeAddress, "any")
-		writer.Write(jsonString)
-	})
+	logicalDb := new(LogicalDb)
+	require.NoError(suite.T(), json.Unmarshal(
+		pgDbaasResponseHandler(blackholeListener.Addr().String(), "any"),
+		logicalDb,
+	))
+	dbaasClient := &contextCancellationDbaasClient{logicalDb: logicalDb}
+
 	params := model.DbParams{Classifier: ServiceClassifier, BaseDbParams: rest.BaseDbParams{Role: "admin"}}
 	client := pgClientImpl{
 		params:          params,
 		postgresqlCache: &cache.DbaaSCache{LogicalDbCache: make(map[cache.Key]interface{})},
-		dbaasClient:     dbaasbase.NewDbaasClient(),
+		dbaasClient:     dbaasClient,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -574,7 +575,38 @@ func (suite *DatabaseTestSuite) TestPgClient_ContextCancellationOnStuckConnectio
 		require.Error(suite.T(), res.err)
 		require.Contains(suite.T(), res.err.Error(), "context deadline exceeded")
 		require.Nil(suite.T(), res.db)
+		require.Equal(suite.T(), 2, dbaasClient.getOrCreateCalls)
+		require.ErrorIs(suite.T(), dbaasClient.recreationContextErr, context.DeadlineExceeded)
 	case <-time.After(1 * time.Second):
-		suite.T().Fatal("Context timeout is not taken into account")
+		suite.T().Fatal("Pool recreation did not return")
 	}
+}
+
+type contextCancellationDbaasClient struct {
+	logicalDb            *LogicalDb
+	getOrCreateCalls     int
+	recreationContextErr error
+}
+
+func (c *contextCancellationDbaasClient) GetOrCreateDb(
+	ctx context.Context,
+	_ string,
+	_ map[string]interface{},
+	_ rest.BaseDbParams,
+) (*LogicalDb, error) {
+	c.getOrCreateCalls++
+	if c.getOrCreateCalls == 1 {
+		return c.logicalDb, nil
+	}
+	c.recreationContextErr = ctx.Err()
+	return nil, c.recreationContextErr
+}
+
+func (c *contextCancellationDbaasClient) GetConnection(
+	context.Context,
+	string,
+	map[string]interface{},
+	rest.BaseDbParams,
+) (map[string]interface{}, error) {
+	return nil, fmt.Errorf("unexpected GetConnection call")
 }
