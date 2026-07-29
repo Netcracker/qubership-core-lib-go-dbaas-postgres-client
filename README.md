@@ -13,10 +13,10 @@ This module provides convenient way of interaction with **postgresql** databases
 This module is based on [uptrace/bun](https://github.com/uptrace/bun) ORM library and [pgx](https://github.com/jackc/pgx) driver.
 
 > **NOTE** If you want to migrate your service from go-microservice-core to new postgres-client please check our 
-> [migration guide](/docs/pg-client-migration-guide.md)
+> [migration guide](docs/pg-client-migration-guide.md)
 
 > **NOTE** from version v1.0.0-beta.1 this library is working with uptrace/bun instead of go-pg library. 
-> If you used previous versions, please check our [migration guide](/docs/bun-migration-guide.md) 
+> If you used previous versions, please check our [migration guide](docs/bun-migration-guide.md) 
 
 - [Install](#install)
 - [Usage](#usage)
