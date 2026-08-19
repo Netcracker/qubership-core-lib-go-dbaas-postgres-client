@@ -56,13 +56,29 @@ func (p *pgClientImpl) GetSqlDb(ctx context.Context) (*sql.DB, error) {
 	}
 	// check if valid
 	if pErr := pgDb.PingContext(ctx); pErr != nil {
-		logger.Warnf("connection ping failed with err: %v. Deleting conn from cache and recreating connection", pErr)
-		p.postgresqlCache.Delete(key)
+		logger.Warnf("connection ping failed with err: %v. Deleting conn from cache and refreshing connection properties", pErr)
+		// Evict only if the cache still holds the pool we found broken. If another goroutine has
+		// already recovered, its healthy pool must be left in place.
+		p.evictIfCurrent(key, pgDb)
 		pgDb.Close()
-		pgDb, err = p.getOrCreateDb(ctx, key, classifier)
-		if err != nil {
-			return nil, err
+		// GetConnection, not GetOrCreateDb: DbaaSPool.GetOrCreateDb serves from its own poolCache,
+		// which this client cannot evict, so it would hand back the stale credentials that caused
+		// the failure. GetConnection is uncached and re-reads the mounted Secret. The rebuild runs
+		// inside the DbaaSCache.Cache callback, which holds the write lock, so racing callers
+		// share one refresh and one pool.
+		rawPgDb, cErr := p.postgresqlCache.Cache(key, func() (interface{}, error) {
+			connConfig, gErr := p.getPasswordAgain(ctx, classifier, p.params.BaseDbParams)
+			if gErr != nil {
+				return nil, gErr
+			}
+			newPgDb := stdlib.OpenDB(*connConfig, p.sqlOptions...)
+			setConnectionSettings(newPgDb)
+			return newPgDb, nil
+		})
+		if cErr != nil {
+			return nil, cErr
 		}
+		pgDb = rawPgDb.(*sql.DB)
 	}
 	if valid, vErr := p.isPasswordValid(ctx, pgDb); !valid && vErr == nil {
 		logger.Info("authentication error, try to get new password")
@@ -70,9 +86,13 @@ func (p *pgClientImpl) GetSqlDb(ctx context.Context) (*sql.DB, error) {
 		if vErr != nil {
 			return nil, vErr
 		}
+		newPgDb := stdlib.OpenDB(*connConfig, p.sqlOptions...)
+		setConnectionSettings(newPgDb)
+		// Publish the replacement before closing the old pool, otherwise the cache keeps a closed
+		// *sql.DB and every later caller has to fall through the ping-failure path to recover.
+		p.replaceIfCurrent(key, pgDb, newPgDb)
 		pgDb.Close()
-		pgDb = stdlib.OpenDB(*connConfig, p.sqlOptions...)
-		setConnectionSettings(pgDb)
+		pgDb = newPgDb
 		logger.Info("db password updated successfully")
 	} else if vErr != nil {
 		return nil, vErr
@@ -86,6 +106,25 @@ func (p *pgClientImpl) getOrCreateDb(ctx context.Context, key cache.Key, classif
 		return nil, err
 	}
 	return rawPgDb.(*sql.DB), nil
+}
+
+// evictIfCurrent removes key from the cache only when it still maps to stale, so a slow caller
+// cannot drop a healthy pool that another goroutine installed in the meantime.
+func (p *pgClientImpl) evictIfCurrent(key cache.Key, stale *sql.DB) {
+	p.postgresqlCache.Mx.Lock()
+	defer p.postgresqlCache.Mx.Unlock()
+	if current, ok := p.postgresqlCache.LogicalDbCache[key].(*sql.DB); ok && current == stale {
+		delete(p.postgresqlCache.LogicalDbCache, key)
+	}
+}
+
+// replaceIfCurrent swaps stale for fresh under key, but only while stale is still the cached pool.
+func (p *pgClientImpl) replaceIfCurrent(key cache.Key, stale *sql.DB, fresh *sql.DB) {
+	p.postgresqlCache.Mx.Lock()
+	defer p.postgresqlCache.Mx.Unlock()
+	if current, ok := p.postgresqlCache.LogicalDbCache[key].(*sql.DB); ok && current == stale {
+		p.postgresqlCache.LogicalDbCache[key] = fresh
+	}
 }
 
 func setConnectionSettings(pgDb *sql.DB) {
@@ -121,12 +160,6 @@ func (p *pgClientImpl) createNewPgDb(ctx context.Context, classifier map[string]
 			return nil, err
 		}
 		logger.Debug("Build go-pg client for database with classifier %+v and type %s", classifier, DB_TYPE)
-		if tls, ok := logicalDb.ConnectionProperties["tls"].(bool); ok && tls {
-			logger.Infof("Connection to postgresql database will be secured")
-			config.TLSConfig = utils.GetTlsConfig()
-			config.TLSConfig.ServerName = logicalDb.ConnectionProperties["host"].(string)
-
-		}
 		sqlDb := stdlib.OpenDB(*config, p.sqlOptions...)
 		setConnectionSettings(sqlDb)
 		err = p.executeMigrationsIfAny(ctx, sqlDb)
@@ -182,6 +215,15 @@ func buildPgConfig(connProperties map[string]interface{}, roReplica bool) (*pgx.
 	}
 	config.User = connectionProperties.Username
 	config.Password = connectionProperties.Password
+	// Applied here rather than at the call site so that every path building a pool - initial
+	// creation and post-failure refresh alike - keeps TLS enabled.
+	if tls, ok := connProperties["tls"].(bool); ok && tls {
+		logger.Infof("Connection to postgresql database will be secured")
+		config.TLSConfig = utils.GetTlsConfig()
+		if host, hasHost := connProperties["host"].(string); hasHost {
+			config.TLSConfig.ServerName = host
+		}
+	}
 	return config, nil
 }
 

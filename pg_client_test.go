@@ -9,9 +9,11 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/jackc/pgx/v5/stdlib"
 	dbaasbase "github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3"
 	"github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3/cache"
@@ -220,6 +222,101 @@ func (suite *DatabaseTestSuite) TestPgClient_GetBunDb_UpdatePassword() {
 
 	// check that connection allows storing and getting info from db
 	suite.checkConnectionIsWorking(conn, ctx)
+
+	// Verify that a subsequent cached call returns the same underlying sql.DB (fresh cached pool remains)
+	sqlDB1, err := pgClient.GetSqlDb(ctx)
+	assert.Nil(suite.T(), err)
+	sqlDB2, err := pgClient.GetSqlDb(ctx)
+	assert.Nil(suite.T(), err)
+	assert.Equal(suite.T(), sqlDB1, sqlDB2)
+}
+
+// concurrentDbaasClient simulates an initial bad logical DB and a subsequent good logical DB on GetConnection
+type concurrentDbaasClient struct {
+	firstLogical       *LogicalDb
+	refreshed          *LogicalDb
+	mu                 sync.Mutex
+	getOrCreateCalls   int
+	getConnectionCalls int
+}
+
+func (c *concurrentDbaasClient) GetOrCreateDb(ctx context.Context, _ string, _ map[string]interface{}, _ rest.BaseDbParams) (*LogicalDb, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.getOrCreateCalls++
+	return c.firstLogical, nil
+}
+
+func (c *concurrentDbaasClient) GetConnection(ctx context.Context, _ string, _ map[string]interface{}, _ rest.BaseDbParams) (map[string]interface{}, error) {
+	c.mu.Lock()
+	c.getConnectionCalls++
+	c.mu.Unlock()
+	return c.refreshed.ConnectionProperties, nil
+}
+
+func (suite *DatabaseTestSuite) TestPgClient_ConcurrentRecovery() {
+	ctx := context.Background()
+	pgContainer := prepareTestContainer(suite.T(), ctx)
+	defer func() {
+		err := pgContainer.Terminate(ctx)
+		if err != nil {
+			suite.T().Fatal(err)
+		}
+	}()
+
+	addr, err := pgContainer.Endpoint(ctx, "")
+	if err != nil {
+		suite.T().Error(err)
+	}
+
+	// initial logical DB points to a blackhole address that will fail ping
+	badAddr := "127.0.0.1:65001"
+	firstLogical := new(LogicalDb)
+	require.NoError(suite.T(), json.Unmarshal(pgDbaasResponseHandler(badAddr, "badpass"), firstLogical))
+
+	// refreshed logical DB points to the working container
+	refreshedLogical := new(LogicalDb)
+	require.NoError(suite.T(), json.Unmarshal(pgDbaasResponseHandler(addr, testContainerDbPassword), refreshedLogical))
+
+	mock := &concurrentDbaasClient{firstLogical: firstLogical, refreshed: refreshedLogical}
+
+	params := model.DbParams{Classifier: ServiceClassifier, BaseDbParams: rest.BaseDbParams{Role: "admin"}}
+	pgClient := pgClientImpl{
+		params:          params,
+		postgresqlCache: &cache.DbaaSCache{LogicalDbCache: make(map[cache.Key]interface{})},
+		dbaasClient:     mock,
+	}
+
+	// spawn concurrent callers that will race to recreate the pool
+	var wg sync.WaitGroup
+	callers := 10
+	results := make([]*sql.DB, callers)
+	errs := make([]error, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			db, err := pgClient.GetSqlDb(ctx)
+			results[i] = db
+			errs[i] = err
+		}(i)
+	}
+	wg.Wait()
+
+	for i := 0; i < callers; i++ {
+		require.NoError(suite.T(), errs[i])
+		require.NotNil(suite.T(), results[i])
+	}
+
+	// all callers should receive the same cached *sql.DB
+	for i := 1; i < callers; i++ {
+		assert.Equal(suite.T(), results[0], results[i])
+	}
+
+	// recovery is single-flight: fresh properties are fetched once and shared by all racing callers
+	assert.Equal(suite.T(), 1, mock.getConnectionCalls)
+	// the stale cached logical db must not be re-read during recovery
+	assert.Equal(suite.T(), 1, mock.getOrCreateCalls)
 }
 
 func (suite *DatabaseTestSuite) TestPgClient_GetConnection_RawSqlDb() {
@@ -575,7 +672,8 @@ func (suite *DatabaseTestSuite) TestPgClient_ContextCancellationRecreatesPool() 
 		require.Error(suite.T(), res.err)
 		require.Contains(suite.T(), res.err.Error(), "context deadline exceeded")
 		require.Nil(suite.T(), res.db)
-		require.Equal(suite.T(), 2, dbaasClient.getOrCreateCalls)
+		require.Equal(suite.T(), 1, dbaasClient.getOrCreateCalls)
+		require.Equal(suite.T(), 1, dbaasClient.getConnectionCalls)
 		require.ErrorIs(suite.T(), dbaasClient.recreationContextErr, context.DeadlineExceeded)
 	case <-time.After(1 * time.Second):
 		suite.T().Fatal("Pool recreation did not return")
@@ -585,6 +683,7 @@ func (suite *DatabaseTestSuite) TestPgClient_ContextCancellationRecreatesPool() 
 type contextCancellationDbaasClient struct {
 	logicalDb            *LogicalDb
 	getOrCreateCalls     int
+	getConnectionCalls   int
 	recreationContextErr error
 }
 
@@ -598,15 +697,179 @@ func (c *contextCancellationDbaasClient) GetOrCreateDb(
 	if c.getOrCreateCalls == 1 {
 		return c.logicalDb, nil
 	}
+	return nil, fmt.Errorf("unexpected repeated GetOrCreateDb call")
+}
+
+// pool recreation refreshes connection properties through GetConnection, so this is where the
+// cancelled context has to surface
+func (c *contextCancellationDbaasClient) GetConnection(
+	ctx context.Context,
+	_ string,
+	_ map[string]interface{},
+	_ rest.BaseDbParams,
+) (map[string]interface{}, error) {
+	c.getConnectionCalls++
 	c.recreationContextErr = ctx.Err()
 	return nil, c.recreationContextErr
 }
 
-func (c *contextCancellationDbaasClient) GetConnection(
-	context.Context,
-	string,
-	map[string]interface{},
-	rest.BaseDbParams,
-) (map[string]interface{}, error) {
-	return nil, fmt.Errorf("unexpected GetConnection call")
+// authRotationDbaasClient serves connection properties carrying the rotated password.
+type authRotationDbaasClient struct {
+	rotated            *LogicalDb
+	getOrCreateCalls   int
+	getConnectionCalls int
+}
+
+func (c *authRotationDbaasClient) GetOrCreateDb(context.Context, string, map[string]interface{}, rest.BaseDbParams) (*LogicalDb, error) {
+	c.getOrCreateCalls++
+	return nil, fmt.Errorf("unexpected GetOrCreateDb call")
+}
+
+func (c *authRotationDbaasClient) GetConnection(_ context.Context, _ string, _ map[string]interface{}, _ rest.BaseDbParams) (map[string]interface{}, error) {
+	c.getConnectionCalls++
+	return c.rotated.ConnectionProperties, nil
+}
+
+// A pool whose credential was rotated after the connection was established stays pingable but fails
+// queries with SQLSTATE 28P01. A real container cannot reproduce that: a wrong password there fails
+// the ping first and diverts into the pool-recreation branch, so the password-refresh branch of
+// GetSqlDb is only reachable against a backend that answers the ping and rejects the query.
+func (suite *DatabaseTestSuite) TestPgClient_GetSqlDb_RefreshesRotatedPassword() {
+	ctx := context.Background()
+	backend := startFakePgBackend(suite.T())
+	defer backend.stop()
+
+	rotated := new(LogicalDb)
+	require.NoError(suite.T(), json.Unmarshal(pgDbaasResponseHandler(backend.addr(), testContainerDbPassword), rotated))
+	dbaasClient := &authRotationDbaasClient{rotated: rotated}
+
+	params := model.DbParams{Classifier: ServiceClassifier, BaseDbParams: rest.BaseDbParams{Role: "admin"}}
+	pgClient := pgClientImpl{
+		params:          params,
+		postgresqlCache: &cache.DbaaSCache{LogicalDbCache: make(map[cache.Key]interface{})},
+		dbaasClient:     dbaasClient,
+	}
+
+	// seed the cache with a pool built from the pre-rotation password
+	stale := new(LogicalDb)
+	require.NoError(suite.T(), json.Unmarshal(pgDbaasResponseHandler(backend.addr(), wrongPassword), stale))
+	staleConfig, err := buildPgConfig(stale.ConnectionProperties, false)
+	require.NoError(suite.T(), err)
+	stalePool := stdlib.OpenDB(*staleConfig)
+	setConnectionSettings(stalePool)
+
+	discriminator := pgDiscriminator{Role: params.BaseDbParams.Role, RoReplica: params.RoReplica}
+	key := cache.NewKeyWithDiscriminator(DB_TYPE, params.Classifier(ctx), &discriminator)
+	pgClient.postgresqlCache.LogicalDbCache[key] = stalePool
+
+	refreshed, err := pgClient.GetSqlDb(ctx)
+	require.NoError(suite.T(), err)
+	require.NotNil(suite.T(), refreshed)
+
+	// the pool was rebuilt from freshly fetched properties, not reused
+	assert.NotSame(suite.T(), stalePool, refreshed)
+	assert.Equal(suite.T(), 1, dbaasClient.getConnectionCalls)
+	assert.Equal(suite.T(), 0, dbaasClient.getOrCreateCalls)
+
+	// the cache holds the replacement, so the next caller does not pick up the closed pool
+	assert.Same(suite.T(), refreshed, pgClient.postgresqlCache.LogicalDbCache[key])
+	assert.ErrorContains(suite.T(), stalePool.PingContext(ctx), "database is closed")
+
+	// the replacement is usable once the backend stops rejecting
+	backend.acceptQueries()
+	assert.NoError(suite.T(), refreshed.PingContext(ctx))
+}
+
+// fakePgBackend is a minimal PostgreSQL server: it completes the startup handshake and answers
+// pgconn's "-- ping" query, but rejects "SELECT 1" with SQLSTATE 28P01 until acceptQueries is called.
+type fakePgBackend struct {
+	listener net.Listener
+	mu       sync.Mutex
+	rejects  bool
+}
+
+func startFakePgBackend(t *testing.T) *fakePgBackend {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	backend := &fakePgBackend{listener: listener, rejects: true}
+	go backend.acceptLoop()
+	return backend
+}
+
+func (s *fakePgBackend) addr() string { return s.listener.Addr().String() }
+
+func (s *fakePgBackend) stop() { s.listener.Close() }
+
+func (s *fakePgBackend) acceptQueries() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rejects = false
+}
+
+func (s *fakePgBackend) rejecting() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.rejects
+}
+
+func (s *fakePgBackend) acceptLoop() {
+	for {
+		conn, err := s.listener.Accept()
+		if err != nil {
+			return
+		}
+		go s.serve(conn)
+	}
+}
+
+func (s *fakePgBackend) serve(conn net.Conn) {
+	defer conn.Close()
+	backend := pgproto3.NewBackend(conn, conn)
+
+	// decline SSL and GSSAPI until the frontend falls back to a plain startup message
+	for {
+		startup, err := backend.ReceiveStartupMessage()
+		if err != nil {
+			return
+		}
+		if _, isStartup := startup.(*pgproto3.StartupMessage); isStartup {
+			break
+		}
+		if _, err := conn.Write([]byte("N")); err != nil {
+			return
+		}
+	}
+
+	backend.Send(&pgproto3.AuthenticationOk{})
+	backend.Send(&pgproto3.ParameterStatus{Name: "server_version", Value: "16.0"})
+	backend.Send(&pgproto3.ParameterStatus{Name: "client_encoding", Value: "UTF8"})
+	backend.Send(&pgproto3.BackendKeyData{ProcessID: 1, SecretKey: []byte{0, 0, 0, 1}})
+	backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+	if err := backend.Flush(); err != nil {
+		return
+	}
+
+	for {
+		msg, err := backend.Receive()
+		if err != nil {
+			return
+		}
+		query, isQuery := msg.(*pgproto3.Query)
+		if !isQuery {
+			return // Terminate, or anything else this fake does not implement
+		}
+		if strings.Contains(query.String, "SELECT 1") && s.rejecting() {
+			backend.Send(&pgproto3.ErrorResponse{
+				Severity: "ERROR",
+				Code:     "28P01",
+				Message:  `password authentication failed for user "postgres"`,
+			})
+		} else {
+			backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("SELECT 0")})
+		}
+		backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+		if err := backend.Flush(); err != nil {
+			return
+		}
+	}
 }
