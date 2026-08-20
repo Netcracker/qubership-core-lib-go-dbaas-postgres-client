@@ -920,18 +920,24 @@ func (s *fakePgBackend) acceptLoop() {
 func (s *fakePgBackend) serve(conn net.Conn) {
 	defer conn.Close()
 	backend := pgproto3.NewBackend(conn, conn)
+	if err := initializeFakePgConnection(conn, backend); err != nil {
+		return
+	}
+	s.serveQueries(backend)
+}
 
-	// decline SSL and GSSAPI until the frontend falls back to a plain startup message
+func initializeFakePgConnection(conn net.Conn, backend *pgproto3.Backend) error {
+	// pgx probes SSL and GSSAPI before sending a plain startup message.
 	for {
 		startup, err := backend.ReceiveStartupMessage()
 		if err != nil {
-			return
+			return err
 		}
 		if _, isStartup := startup.(*pgproto3.StartupMessage); isStartup {
 			break
 		}
 		if _, err := conn.Write([]byte("N")); err != nil {
-			return
+			return err
 		}
 	}
 
@@ -940,10 +946,10 @@ func (s *fakePgBackend) serve(conn net.Conn) {
 	backend.Send(&pgproto3.ParameterStatus{Name: "client_encoding", Value: "UTF8"})
 	backend.Send(&pgproto3.BackendKeyData{ProcessID: 1, SecretKey: []byte{0, 0, 0, 1}})
 	backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-	if err := backend.Flush(); err != nil {
-		return
-	}
+	return backend.Flush()
+}
 
+func (s *fakePgBackend) serveQueries(backend *pgproto3.Backend) {
 	for {
 		msg, err := backend.Receive()
 		if err != nil {
@@ -953,21 +959,25 @@ func (s *fakePgBackend) serve(conn net.Conn) {
 		if !isQuery {
 			return // Terminate, or anything else this fake does not implement
 		}
-		if strings.Contains(query.String, "SELECT 1") && s.rejecting() {
-			if s.authBarrier != nil {
-				s.authBarrier.wait()
-			}
-			backend.Send(&pgproto3.ErrorResponse{
-				Severity: "ERROR",
-				Code:     "28P01",
-				Message:  `password authentication failed for user "postgres"`,
-			})
-		} else {
-			backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("SELECT 0")})
-		}
-		backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-		if err := backend.Flush(); err != nil {
+		if err := s.sendQueryResponse(backend, query); err != nil {
 			return
 		}
 	}
+}
+
+func (s *fakePgBackend) sendQueryResponse(backend *pgproto3.Backend, query *pgproto3.Query) error {
+	if strings.Contains(query.String, "SELECT 1") && s.rejecting() {
+		if s.authBarrier != nil {
+			s.authBarrier.wait()
+		}
+		backend.Send(&pgproto3.ErrorResponse{
+			Severity: "ERROR",
+			Code:     "28P01",
+			Message:  `password authentication failed for user "postgres"`,
+		})
+	} else {
+		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("SELECT 0")})
+	}
+	backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+	return backend.Flush()
 }
