@@ -716,18 +716,29 @@ func (c *contextCancellationDbaasClient) GetConnection(
 // authRotationDbaasClient serves connection properties carrying the rotated password.
 type authRotationDbaasClient struct {
 	rotated            *LogicalDb
+	mu                 sync.Mutex
 	getOrCreateCalls   int
 	getConnectionCalls int
 }
 
 func (c *authRotationDbaasClient) GetOrCreateDb(context.Context, string, map[string]interface{}, rest.BaseDbParams) (*LogicalDb, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.getOrCreateCalls++
 	return nil, fmt.Errorf("unexpected GetOrCreateDb call")
 }
 
 func (c *authRotationDbaasClient) GetConnection(_ context.Context, _ string, _ map[string]interface{}, _ rest.BaseDbParams) (map[string]interface{}, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.getConnectionCalls++
 	return c.rotated.ConnectionProperties, nil
+}
+
+func (c *authRotationDbaasClient) calls() (int, int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.getOrCreateCalls, c.getConnectionCalls
 }
 
 // A pool whose credential was rotated after the connection was established stays pingable but fails
@@ -739,28 +750,7 @@ func (suite *DatabaseTestSuite) TestPgClient_GetSqlDb_RefreshesRotatedPassword()
 	backend := startFakePgBackend(suite.T())
 	defer backend.stop()
 
-	rotated := new(LogicalDb)
-	require.NoError(suite.T(), json.Unmarshal(pgDbaasResponseHandler(backend.addr(), testContainerDbPassword), rotated))
-	dbaasClient := &authRotationDbaasClient{rotated: rotated}
-
-	params := model.DbParams{Classifier: ServiceClassifier, BaseDbParams: rest.BaseDbParams{Role: "admin"}}
-	pgClient := pgClientImpl{
-		params:          params,
-		postgresqlCache: &cache.DbaaSCache{LogicalDbCache: make(map[cache.Key]interface{})},
-		dbaasClient:     dbaasClient,
-	}
-
-	// seed the cache with a pool built from the pre-rotation password
-	stale := new(LogicalDb)
-	require.NoError(suite.T(), json.Unmarshal(pgDbaasResponseHandler(backend.addr(), wrongPassword), stale))
-	staleConfig, err := buildPgConfig(stale.ConnectionProperties, false)
-	require.NoError(suite.T(), err)
-	stalePool := stdlib.OpenDB(*staleConfig)
-	setConnectionSettings(stalePool)
-
-	discriminator := pgDiscriminator{Role: params.BaseDbParams.Role, RoReplica: params.RoReplica}
-	key := cache.NewKeyWithDiscriminator(DB_TYPE, params.Classifier(ctx), &discriminator)
-	pgClient.postgresqlCache.LogicalDbCache[key] = stalePool
+	pgClient, dbaasClient, stalePool, key := prepareAuthRotationClient(suite.T(), ctx, backend)
 
 	refreshed, err := pgClient.GetSqlDb(ctx)
 	require.NoError(suite.T(), err)
@@ -768,8 +758,9 @@ func (suite *DatabaseTestSuite) TestPgClient_GetSqlDb_RefreshesRotatedPassword()
 
 	// the pool was rebuilt from freshly fetched properties, not reused
 	assert.NotSame(suite.T(), stalePool, refreshed)
-	assert.Equal(suite.T(), 1, dbaasClient.getConnectionCalls)
-	assert.Equal(suite.T(), 0, dbaasClient.getOrCreateCalls)
+	getOrCreateCalls, getConnectionCalls := dbaasClient.calls()
+	assert.Equal(suite.T(), 1, getConnectionCalls)
+	assert.Equal(suite.T(), 0, getOrCreateCalls)
 
 	// the cache holds the replacement, so the next caller does not pick up the closed pool
 	assert.Same(suite.T(), refreshed, pgClient.postgresqlCache.LogicalDbCache[key])
@@ -780,12 +771,85 @@ func (suite *DatabaseTestSuite) TestPgClient_GetSqlDb_RefreshesRotatedPassword()
 	assert.NoError(suite.T(), refreshed.PingContext(ctx))
 }
 
+func (suite *DatabaseTestSuite) TestPgClient_GetSqlDb_ConcurrentAuthenticationRecovery() {
+	ctx := context.Background()
+	const callers = DEFAULT_CONNECTIONS_NUMBER
+	authBarrier := newQueryBarrier(callers)
+	defer authBarrier.releaseAll()
+	backend := startFakePgBackend(suite.T())
+	backend.authBarrier = authBarrier
+	defer backend.stop()
+
+	pgClient, dbaasClient, stalePool, key := prepareAuthRotationClient(suite.T(), ctx, backend)
+	stalePool.SetMaxOpenConns(callers)
+	results := make([]*sql.DB, callers)
+	errs := make([]error, callers)
+
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i], errs[i] = pgClient.GetSqlDb(ctx)
+		}(i)
+	}
+
+	select {
+	case <-authBarrier.ready:
+		authBarrier.releaseAll()
+	case <-time.After(5 * time.Second):
+		suite.T().Fatal("Concurrent callers did not reach password validation")
+	}
+	wg.Wait()
+
+	for i := range callers {
+		require.NoError(suite.T(), errs[i])
+		require.NotNil(suite.T(), results[i])
+		assert.Same(suite.T(), results[0], results[i])
+	}
+	getOrCreateCalls, getConnectionCalls := dbaasClient.calls()
+	assert.Equal(suite.T(), 0, getOrCreateCalls)
+	assert.Equal(suite.T(), 1, getConnectionCalls)
+	assert.Same(suite.T(), results[0], pgClient.postgresqlCache.LogicalDbCache[key])
+	assert.ErrorContains(suite.T(), stalePool.PingContext(ctx), "database is closed")
+}
+
+func prepareAuthRotationClient(
+	t *testing.T,
+	ctx context.Context,
+	backend *fakePgBackend,
+) (*pgClientImpl, *authRotationDbaasClient, *sql.DB, cache.Key) {
+	rotated := new(LogicalDb)
+	require.NoError(t, json.Unmarshal(pgDbaasResponseHandler(backend.addr(), testContainerDbPassword), rotated))
+	dbaasClient := &authRotationDbaasClient{rotated: rotated}
+
+	params := model.DbParams{Classifier: ServiceClassifier, BaseDbParams: rest.BaseDbParams{Role: "admin"}}
+	pgClient := &pgClientImpl{
+		params:          params,
+		postgresqlCache: &cache.DbaaSCache{LogicalDbCache: make(map[cache.Key]interface{})},
+		dbaasClient:     dbaasClient,
+	}
+
+	stale := new(LogicalDb)
+	require.NoError(t, json.Unmarshal(pgDbaasResponseHandler(backend.addr(), wrongPassword), stale))
+	staleConfig, err := buildPgConfig(stale.ConnectionProperties, false)
+	require.NoError(t, err)
+	stalePool := stdlib.OpenDB(*staleConfig)
+	setConnectionSettings(stalePool)
+
+	discriminator := pgDiscriminator{Role: params.BaseDbParams.Role, RoReplica: params.RoReplica}
+	key := cache.NewKeyWithDiscriminator(DB_TYPE, params.Classifier(ctx), &discriminator)
+	pgClient.postgresqlCache.LogicalDbCache[key] = stalePool
+	return pgClient, dbaasClient, stalePool, key
+}
+
 // fakePgBackend is a minimal PostgreSQL server: it completes the startup handshake and answers
 // pgconn's "-- ping" query, but rejects "SELECT 1" with SQLSTATE 28P01 until acceptQueries is called.
 type fakePgBackend struct {
-	listener net.Listener
-	mu       sync.Mutex
-	rejects  bool
+	listener    net.Listener
+	mu          sync.Mutex
+	rejects     bool
+	authBarrier *queryBarrier
 }
 
 func startFakePgBackend(t *testing.T) *fakePgBackend {
@@ -810,6 +874,37 @@ func (s *fakePgBackend) rejecting() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.rejects
+}
+
+type queryBarrier struct {
+	target      int
+	ready       chan struct{}
+	release     chan struct{}
+	releaseOnce sync.Once
+	mu          sync.Mutex
+	arrived     int
+}
+
+func newQueryBarrier(target int) *queryBarrier {
+	return &queryBarrier{
+		target:  target,
+		ready:   make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (b *queryBarrier) wait() {
+	b.mu.Lock()
+	b.arrived++
+	if b.arrived == b.target {
+		close(b.ready)
+	}
+	b.mu.Unlock()
+	<-b.release
+}
+
+func (b *queryBarrier) releaseAll() {
+	b.releaseOnce.Do(func() { close(b.release) })
 }
 
 func (s *fakePgBackend) acceptLoop() {
@@ -859,6 +954,9 @@ func (s *fakePgBackend) serve(conn net.Conn) {
 			return // Terminate, or anything else this fake does not implement
 		}
 		if strings.Contains(query.String, "SELECT 1") && s.rejecting() {
+			if s.authBarrier != nil {
+				s.authBarrier.wait()
+			}
 			backend.Send(&pgproto3.ErrorResponse{
 				Severity: "ERROR",
 				Code:     "28P01",

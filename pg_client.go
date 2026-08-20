@@ -57,45 +57,25 @@ func (p *pgClientImpl) GetSqlDb(ctx context.Context) (*sql.DB, error) {
 	// check if valid
 	if pErr := pgDb.PingContext(ctx); pErr != nil {
 		logger.Warnf("connection ping failed with err: %v. Deleting conn from cache and refreshing connection properties", pErr)
-		// Evict only if the cache still holds the pool we found broken. If another goroutine has
-		// already recovered, its healthy pool must be left in place.
-		p.evictIfCurrent(key, pgDb)
-		pgDb.Close()
-		// GetConnection, not GetOrCreateDb: DbaaSPool.GetOrCreateDb serves from its own poolCache,
-		// which this client cannot evict, so it would hand back the stale credentials that caused
-		// the failure. GetConnection is uncached and re-reads the mounted Secret. The rebuild runs
-		// inside the DbaaSCache.Cache callback, which holds the write lock, so racing callers
-		// share one refresh and one pool.
-		rawPgDb, cErr := p.postgresqlCache.Cache(key, func() (interface{}, error) {
-			connConfig, gErr := p.getPasswordAgain(ctx, classifier, p.params.BaseDbParams)
-			if gErr != nil {
-				return nil, gErr
-			}
-			newPgDb := stdlib.OpenDB(*connConfig, p.sqlOptions...)
-			setConnectionSettings(newPgDb)
-			return newPgDb, nil
-		})
-		if cErr != nil {
-			return nil, cErr
+		pgDb, err = p.refreshConnection(ctx, key, classifier, pgDb)
+		if err != nil {
+			return nil, err
 		}
-		pgDb = rawPgDb.(*sql.DB)
 	}
 	if valid, vErr := p.isPasswordValid(ctx, pgDb); !valid && vErr == nil {
 		logger.Info("authentication error, try to get new password")
-		connConfig, vErr := p.getPasswordAgain(ctx, classifier, p.params.BaseDbParams)
-		if vErr != nil {
-			return nil, vErr
+		pgDb, err = p.refreshConnection(ctx, key, classifier, pgDb)
+		if err != nil {
+			return nil, err
 		}
-		newPgDb := stdlib.OpenDB(*connConfig, p.sqlOptions...)
-		setConnectionSettings(newPgDb)
-		// Publish the replacement before closing the old pool, otherwise the cache keeps a closed
-		// *sql.DB and every later caller has to fall through the ping-failure path to recover.
-		p.replaceIfCurrent(key, pgDb, newPgDb)
-		pgDb.Close()
-		pgDb = newPgDb
 		logger.Info("db password updated successfully")
 	} else if vErr != nil {
-		return nil, vErr
+		// Another caller may have replaced and closed this pool during validation.
+		if replacement, ok := p.cachedReplacement(key, pgDb); ok {
+			pgDb = replacement
+		} else {
+			return nil, vErr
+		}
 	}
 	return pgDb, nil
 }
@@ -110,21 +90,48 @@ func (p *pgClientImpl) getOrCreateDb(ctx context.Context, key cache.Key, classif
 
 // evictIfCurrent removes key from the cache only when it still maps to stale, so a slow caller
 // cannot drop a healthy pool that another goroutine installed in the meantime.
-func (p *pgClientImpl) evictIfCurrent(key cache.Key, stale *sql.DB) {
+func (p *pgClientImpl) evictIfCurrent(key cache.Key, pgDb *sql.DB) {
 	p.postgresqlCache.Mx.Lock()
 	defer p.postgresqlCache.Mx.Unlock()
-	if current, ok := p.postgresqlCache.LogicalDbCache[key].(*sql.DB); ok && current == stale {
+	if cachedPgDb, ok := p.postgresqlCache.LogicalDbCache[key].(*sql.DB); ok && cachedPgDb == pgDb {
 		delete(p.postgresqlCache.LogicalDbCache, key)
 	}
 }
 
-// replaceIfCurrent swaps stale for fresh under key, but only while stale is still the cached pool.
-func (p *pgClientImpl) replaceIfCurrent(key cache.Key, stale *sql.DB, fresh *sql.DB) {
-	p.postgresqlCache.Mx.Lock()
-	defer p.postgresqlCache.Mx.Unlock()
-	if current, ok := p.postgresqlCache.LogicalDbCache[key].(*sql.DB); ok && current == stale {
-		p.postgresqlCache.LogicalDbCache[key] = fresh
+func (p *pgClientImpl) cachedReplacement(key cache.Key, pgDb *sql.DB) (*sql.DB, bool) {
+	p.postgresqlCache.Mx.RLock()
+	defer p.postgresqlCache.Mx.RUnlock()
+	cachedPgDb, ok := p.postgresqlCache.LogicalDbCache[key].(*sql.DB)
+	return cachedPgDb, ok && cachedPgDb != pgDb
+}
+
+func (p *pgClientImpl) refreshConnection(
+	ctx context.Context,
+	key cache.Key,
+	classifier map[string]interface{},
+	pgDb *sql.DB,
+) (*sql.DB, error) {
+	p.evictIfCurrent(key, pgDb)
+	rawPgDb, err := p.postgresqlCache.Cache(key, func() (interface{}, error) {
+		// GetConnection, not GetOrCreateDb: DbaaSPool.GetOrCreateDb serves from its own poolCache,
+		// which this client cannot evict, so it would return the credentials that caused the failure.
+		connConfig, gErr := p.getPasswordAgain(ctx, classifier, p.params.BaseDbParams)
+		if gErr != nil {
+			return nil, gErr
+		}
+		newPgDb := stdlib.OpenDB(*connConfig, p.sqlOptions...)
+		setConnectionSettings(newPgDb)
+		return newPgDb, nil
+	})
+	if err != nil {
+		pgDb.Close()
+		return nil, err
 	}
+	newPgDb := rawPgDb.(*sql.DB)
+	if newPgDb != pgDb {
+		pgDb.Close()
+	}
+	return newPgDb, nil
 }
 
 func setConnectionSettings(pgDb *sql.DB) {
