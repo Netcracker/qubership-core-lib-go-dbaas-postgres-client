@@ -57,7 +57,7 @@ func (p *pgClientImpl) GetSqlDb(ctx context.Context) (*sql.DB, error) {
 	// check if valid
 	if pErr := pgDb.PingContext(ctx); pErr != nil {
 		logger.Warnf("connection ping failed with err: %v. Deleting conn from cache and refreshing connection properties", pErr)
-		pgDb, err = p.refreshConnection(ctx, key, classifier, pgDb)
+		pgDb, err = p.renewConnection(ctx, key, classifier, pgDb)
 		if err != nil {
 			return nil, err
 		}
@@ -105,6 +105,35 @@ func (p *pgClientImpl) cachedReplacement(key cache.Key, pgDb *sql.DB) (*sql.DB, 
 	return cachedPgDb, ok && cachedPgDb != pgDb
 }
 
+// renewConnection replaces a pool that can no longer serve queries.
+//
+// It first re-reads the connection properties, which is all a rotated credential needs. When that
+// lookup fails - most importantly when the logical database no longer exists in DbaaS - it falls
+// back to get-or-create, which recreates the database and runs migrations. Escalating only on
+// failure keeps the common cases (rotation, a dropped session, a network blip) on the cheap
+// read-only path, while a lost database is still restored within the same call rather than failing
+// this caller and leaving the recovery to the next one.
+func (p *pgClientImpl) renewConnection(
+	ctx context.Context,
+	key cache.Key,
+	classifier map[string]interface{},
+	pgDb *sql.DB,
+) (*sql.DB, error) {
+	newPgDb, err := p.refreshConnection(ctx, key, classifier, pgDb)
+	if err == nil {
+		return newPgDb, nil
+	}
+	// A cancelled or expired context means the caller has already given up, so the fallback would
+	// spend another DBaaS request only to return the error the caller is waiting for anyway.
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return nil, err
+	}
+	// refreshConnection already evicted the cache entry and closed pgDb, so this re-enters the
+	// creation path instead of returning the pool that just failed.
+	logger.Warnf("connection refresh failed with err: %v. Falling back to get-or-create", err)
+	return p.getOrCreateDb(ctx, key, classifier)
+}
+
 func (p *pgClientImpl) refreshConnection(
 	ctx context.Context,
 	key cache.Key,
@@ -113,8 +142,10 @@ func (p *pgClientImpl) refreshConnection(
 ) (*sql.DB, error) {
 	p.evictIfCurrent(key, pgDb)
 	rawPgDb, err := p.postgresqlCache.Cache(key, func() (interface{}, error) {
-		// GetConnection, not GetOrCreateDb: DbaaSPool.GetOrCreateDb serves from its own poolCache,
-		// which this client cannot evict, so it would return the credentials that caused the failure.
+		// GetConnection, not GetOrCreateDb: a refresh only needs the current credentials, so it must
+		// neither provision a database nor re-run migrations on what is usually a transient failure.
+		// A lookup that fails because the database is genuinely gone is handled by the caller, which
+		// falls back to get-or-create.
 		connConfig, gErr := p.getPasswordAgain(ctx, classifier, p.params.BaseDbParams)
 		if gErr != nil {
 			return nil, gErr

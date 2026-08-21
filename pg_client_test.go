@@ -981,3 +981,80 @@ func (s *fakePgBackend) sendQueryResponse(backend *pgproto3.Backend, query *pgpr
 	backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 	return backend.Flush()
 }
+
+// droppedDbDbaasClient models a logical database that no longer exists in DbaaS: the lookup used by
+// the refresh path fails, while get-or-create still provisions it.
+type droppedDbDbaasClient struct {
+	recreated          *LogicalDb
+	mu                 sync.Mutex
+	getOrCreateCalls   int
+	getConnectionCalls int
+}
+
+func (c *droppedDbDbaasClient) GetOrCreateDb(context.Context, string, map[string]interface{}, rest.BaseDbParams) (*LogicalDb, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.getOrCreateCalls++
+	return c.recreated, nil
+}
+
+func (c *droppedDbDbaasClient) GetConnection(context.Context, string, map[string]interface{}, rest.BaseDbParams) (map[string]interface{}, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.getConnectionCalls++
+	return nil, fmt.Errorf("database was dropped")
+}
+
+func (c *droppedDbDbaasClient) calls() (int, int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.getOrCreateCalls, c.getConnectionCalls
+}
+
+// A refresh that cannot find the database must not strand the caller. The cheap lookup is tried
+// first, and when it fails the same call escalates to get-or-create, so a single GetSqlDb both
+// reports and repairs the loss instead of returning an error and leaving the repair to whoever
+// calls next.
+func (suite *DatabaseTestSuite) TestPgClient_RefreshFallsBackToGetOrCreate() {
+	ctx := context.Background()
+	backend := startFakePgBackend(suite.T())
+	backend.acceptQueries()
+	defer backend.stop()
+
+	recreated := new(LogicalDb)
+	require.NoError(suite.T(), json.Unmarshal(pgDbaasResponseHandler(backend.addr(), testContainerDbPassword), recreated))
+	dbaasClient := &droppedDbDbaasClient{recreated: recreated}
+
+	params := model.DbParams{Classifier: ServiceClassifier, BaseDbParams: rest.BaseDbParams{Role: "admin"}}
+	pgClient := &pgClientImpl{
+		params:          params,
+		postgresqlCache: &cache.DbaaSCache{LogicalDbCache: make(map[cache.Key]interface{})},
+		dbaasClient:     dbaasClient,
+	}
+
+	// Seed the cache with a pool pointing at a closed port, so the ping fails the way it would
+	// after the database went away.
+	stale := new(LogicalDb)
+	require.NoError(suite.T(), json.Unmarshal(pgDbaasResponseHandler("127.0.0.1:65001", testContainerDbPassword), stale))
+	staleConfig, err := buildPgConfig(stale.ConnectionProperties, false)
+	require.NoError(suite.T(), err)
+	stalePool := stdlib.OpenDB(*staleConfig)
+	setConnectionSettings(stalePool)
+
+	discriminator := pgDiscriminator{Role: params.BaseDbParams.Role, RoReplica: params.RoReplica}
+	key := cache.NewKeyWithDiscriminator(DB_TYPE, params.Classifier(ctx), &discriminator)
+	pgClient.postgresqlCache.LogicalDbCache[key] = stalePool
+
+	// One call, not two: this is the whole point of the fallback.
+	pool, err := pgClient.GetSqlDb(ctx)
+	require.NoError(suite.T(), err)
+	require.NotNil(suite.T(), pool)
+	assert.NotSame(suite.T(), stalePool, pool, "the failed pool must be replaced, not returned")
+	require.NoError(suite.T(), pool.PingContext(ctx), "the recovered pool must be usable")
+
+	getOrCreateCalls, getConnectionCalls := dbaasClient.calls()
+	assert.Equal(suite.T(), 1, getConnectionCalls, "the cheap lookup must be attempted first")
+	assert.Equal(suite.T(), 1, getOrCreateCalls, "the failed lookup must escalate to get-or-create")
+	assert.Same(suite.T(), pool, pgClient.postgresqlCache.LogicalDbCache[key], "the recovered pool must be cached")
+	assert.ErrorContains(suite.T(), stalePool.PingContext(ctx), "database is closed")
+}
