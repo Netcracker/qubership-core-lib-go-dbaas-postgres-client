@@ -56,26 +56,26 @@ func (p *pgClientImpl) GetSqlDb(ctx context.Context) (*sql.DB, error) {
 	}
 	// check if valid
 	if pErr := pgDb.PingContext(ctx); pErr != nil {
-		logger.Warnf("connection ping failed with err: %v. Deleting conn from cache and recreating connection", pErr)
-		p.postgresqlCache.Delete(key)
-		pgDb.Close()
-		pgDb, err = p.getOrCreateDb(ctx, key, classifier)
+		logger.Warnf("connection ping failed with err: %v. Deleting conn from cache and refreshing connection properties", pErr)
+		pgDb, err = p.renewConnection(ctx, key, classifier, pgDb)
 		if err != nil {
 			return nil, err
 		}
 	}
 	if valid, vErr := p.isPasswordValid(ctx, pgDb); !valid && vErr == nil {
 		logger.Info("authentication error, try to get new password")
-		connConfig, vErr := p.getPasswordAgain(ctx, classifier, p.params.BaseDbParams)
-		if vErr != nil {
-			return nil, vErr
+		pgDb, err = p.refreshConnection(ctx, key, classifier, pgDb)
+		if err != nil {
+			return nil, err
 		}
-		pgDb.Close()
-		pgDb = stdlib.OpenDB(*connConfig, p.sqlOptions...)
-		setConnectionSettings(pgDb)
 		logger.Info("db password updated successfully")
 	} else if vErr != nil {
-		return nil, vErr
+		// Another caller may have replaced and closed this pool during validation.
+		if replacement, ok := p.cachedReplacement(key, pgDb); ok {
+			pgDb = replacement
+		} else {
+			return nil, vErr
+		}
 	}
 	return pgDb, nil
 }
@@ -86,6 +86,83 @@ func (p *pgClientImpl) getOrCreateDb(ctx context.Context, key cache.Key, classif
 		return nil, err
 	}
 	return rawPgDb.(*sql.DB), nil
+}
+
+// evictIfCurrent removes key from the cache only when it still maps to stale, so a slow caller
+// cannot drop a healthy pool that another goroutine installed in the meantime.
+func (p *pgClientImpl) evictIfCurrent(key cache.Key, pgDb *sql.DB) {
+	p.postgresqlCache.Mx.Lock()
+	defer p.postgresqlCache.Mx.Unlock()
+	if cachedPgDb, ok := p.postgresqlCache.LogicalDbCache[key].(*sql.DB); ok && cachedPgDb == pgDb {
+		delete(p.postgresqlCache.LogicalDbCache, key)
+	}
+}
+
+func (p *pgClientImpl) cachedReplacement(key cache.Key, pgDb *sql.DB) (*sql.DB, bool) {
+	p.postgresqlCache.Mx.RLock()
+	defer p.postgresqlCache.Mx.RUnlock()
+	cachedPgDb, ok := p.postgresqlCache.LogicalDbCache[key].(*sql.DB)
+	return cachedPgDb, ok && cachedPgDb != pgDb
+}
+
+// renewConnection replaces a pool that can no longer serve queries.
+//
+// It first re-reads the connection properties, which is all a rotated credential needs. When that
+// lookup fails - most importantly when the logical database no longer exists in DbaaS - it falls
+// back to get-or-create, which recreates the database and runs migrations. Escalating only on
+// failure keeps the common cases (rotation, a dropped session, a network blip) on the cheap
+// read-only path, while a lost database is still restored within the same call rather than failing
+// this caller and leaving the recovery to the next one.
+func (p *pgClientImpl) renewConnection(
+	ctx context.Context,
+	key cache.Key,
+	classifier map[string]interface{},
+	pgDb *sql.DB,
+) (*sql.DB, error) {
+	newPgDb, err := p.refreshConnection(ctx, key, classifier, pgDb)
+	if err == nil {
+		return newPgDb, nil
+	}
+	// A cancelled or expired context means the caller has already given up, so the fallback would
+	// spend another DBaaS request only to return the error the caller is waiting for anyway.
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return nil, err
+	}
+	// refreshConnection already evicted the cache entry and closed pgDb, so this re-enters the
+	// creation path instead of returning the pool that just failed.
+	logger.Warnf("connection refresh failed with err: %v. Falling back to get-or-create", err)
+	return p.getOrCreateDb(ctx, key, classifier)
+}
+
+func (p *pgClientImpl) refreshConnection(
+	ctx context.Context,
+	key cache.Key,
+	classifier map[string]interface{},
+	pgDb *sql.DB,
+) (*sql.DB, error) {
+	p.evictIfCurrent(key, pgDb)
+	rawPgDb, err := p.postgresqlCache.Cache(key, func() (interface{}, error) {
+		// GetConnection, not GetOrCreateDb: a refresh only needs the current credentials, so it must
+		// neither provision a database nor re-run migrations on what is usually a transient failure.
+		// A lookup that fails because the database is genuinely gone is handled by the caller, which
+		// falls back to get-or-create.
+		connConfig, gErr := p.getPasswordAgain(ctx, classifier, p.params.BaseDbParams)
+		if gErr != nil {
+			return nil, gErr
+		}
+		newPgDb := stdlib.OpenDB(*connConfig, p.sqlOptions...)
+		setConnectionSettings(newPgDb)
+		return newPgDb, nil
+	})
+	if err != nil {
+		pgDb.Close()
+		return nil, err
+	}
+	newPgDb := rawPgDb.(*sql.DB)
+	if newPgDb != pgDb {
+		pgDb.Close()
+	}
+	return newPgDb, nil
 }
 
 func setConnectionSettings(pgDb *sql.DB) {
@@ -121,12 +198,6 @@ func (p *pgClientImpl) createNewPgDb(ctx context.Context, classifier map[string]
 			return nil, err
 		}
 		logger.Debug("Build go-pg client for database with classifier %+v and type %s", classifier, DB_TYPE)
-		if tls, ok := logicalDb.ConnectionProperties["tls"].(bool); ok && tls {
-			logger.Infof("Connection to postgresql database will be secured")
-			config.TLSConfig = utils.GetTlsConfig()
-			config.TLSConfig.ServerName = logicalDb.ConnectionProperties["host"].(string)
-
-		}
 		sqlDb := stdlib.OpenDB(*config, p.sqlOptions...)
 		setConnectionSettings(sqlDb)
 		err = p.executeMigrationsIfAny(ctx, sqlDb)
@@ -182,6 +253,15 @@ func buildPgConfig(connProperties map[string]interface{}, roReplica bool) (*pgx.
 	}
 	config.User = connectionProperties.Username
 	config.Password = connectionProperties.Password
+	// Applied here rather than at the call site so that every path building a pool - initial
+	// creation and post-failure refresh alike - keeps TLS enabled.
+	if tls, ok := connProperties["tls"].(bool); ok && tls {
+		logger.Infof("Connection to postgresql database will be secured")
+		config.TLSConfig = utils.GetTlsConfig()
+		if host, hasHost := connProperties["host"].(string); hasHost {
+			config.TLSConfig.ServerName = host
+		}
+	}
 	return config, nil
 }
 
