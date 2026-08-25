@@ -3,10 +3,10 @@ package pgdbaas
 import (
 	"context"
 
-	"github.com/netcracker/qubership-core-lib-go/v3/logging"
 	dbaasbase "github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3"
 	"github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3/cache"
 	"github.com/netcracker/qubership-core-lib-go-dbaas-postgres-client/v4/model"
+	"github.com/netcracker/qubership-core-lib-go/v3/logging"
 )
 
 var logger logging.Logger
@@ -20,7 +20,7 @@ const (
 )
 
 func NewClient(pool *dbaasbase.DbaaSPool) *DbaaSPostgreSqlClient {
-	localCache := cache.DbaaSCache{
+	localCache := &cache.DbaaSCache{
 		LogicalDbCache: make(map[cache.Key]interface{}),
 	}
 	return &DbaaSPostgreSqlClient{
@@ -30,7 +30,7 @@ func NewClient(pool *dbaasbase.DbaaSPool) *DbaaSPostgreSqlClient {
 }
 
 type DbaaSPostgreSqlClient struct {
-	pgClientCache cache.DbaaSCache
+	pgClientCache *cache.DbaaSCache
 	pool          *dbaasbase.DbaaSPool
 }
 
@@ -38,7 +38,7 @@ func (d *DbaaSPostgreSqlClient) ServiceDatabase(params ...model.DbParams) Databa
 	return &database{
 		params:        d.buildServiceDbParams(params),
 		dbaasPool:     d.pool,
-		postgresCache: &d.pgClientCache,
+		postgresCache: d.pgClientCache,
 	}
 }
 
@@ -57,7 +57,7 @@ func (d *DbaaSPostgreSqlClient) TenantDatabase(params ...model.DbParams) Databas
 	return &database{
 		params:        d.buildTenantDbParams(params),
 		dbaasPool:     d.pool,
-		postgresCache: &d.pgClientCache,
+		postgresCache: d.pgClientCache,
 	}
 }
 
