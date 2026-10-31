@@ -3,7 +3,7 @@ module github.com/netcracker/qubership-core-lib-go-dbaas-postgres-client/v4
 go 1.26.5
 
 require (
-	github.com/jackc/pgx/v5 v5.11.0
+	github.com/jackc/pgx/v5 v5.12.0
 	github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3 v3.8.3
 	github.com/netcracker/qubership-core-lib-go/v3 v3.15.3
 	github.com/stretchr/testify v1.12.1
@@ -39,7 +39,7 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
-	github.com/jackc/puddle/v2 v2.2.2 // indirect
+	github.com/jackc/puddle/v2 v2.2.3 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/klauspost/compress v1.18.7 // indirect
 	github.com/knadh/koanf/maps v0.1.3 // indirect
